@@ -2,6 +2,7 @@ package report
 
 import (
 	"time"
+	"unsafe"
 
 	"github.com/ugorji/go/codec"
 	"github.com/weaveworks/common/mtime"
@@ -98,12 +99,37 @@ func (nc *NodeControls) CodecEncodeSelf(encoder *codec.Encoder) {
 }
 
 // CodecDecodeSelf implements codec.Selfer
+// Re-coded using codec internals to avoid creating an intermediate object
+// - said object escapes to the heap
 func (nc *NodeControls) CodecDecodeSelf(decoder *codec.Decoder) {
-	in := wireNodeControls{}
-	in.CodecDecodeSelf(decoder)
-	*nc = NodeControls{
-		Timestamp: parseTime(in.Timestamp),
-		Controls:  in.Controls,
+	z, r := codec.GenHelperDecoder(decoder)
+	if r.TryDecodeAsNil() {
+		return
+	}
+	length := r.ReadMapStart()
+	for i := 0; length < 0 || i < length; i++ {
+		if length < 0 && r.CheckBreak() {
+			break
+		}
+		z.DecSendContainerState(containerMapKey)
+		// replace down to switch with DecodeStringAsBytes from newer version of codec
+		buf := z.DecScratchBuffer()
+		slc := r.DecodeBytes(buf[:], true, true)
+		type unsafeString struct {
+			Data uintptr
+			Len  int
+		}
+		str := unsafeString{uintptr(unsafe.Pointer(&slc[0])), len(slc)}
+		k := *(*string)(unsafe.Pointer(&str))
+		switch string(k) {
+		case "timestamp":
+			// can't avoid the allocation to string without re-implementing time.Parse
+			nc.Timestamp = parseTime(r.DecodeString())
+		case "controls":
+			if !r.TryDecodeAsNil() {
+				nc.Controls.CodecDecodeSelf(decoder)
+			}
+		}
 	}
 }
 
